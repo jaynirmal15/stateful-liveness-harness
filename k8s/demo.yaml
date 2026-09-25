@@ -1,0 +1,154 @@
+# Three deployments of the same binary, differing only in which liveness
+# endpoint the kubelet is pointed at. Everything else -- readiness, resources,
+# timings -- is identical, so the comparison isolates the liveness decision.
+#
+#   naive     -> /healthz       the HTTP server is up, so 200
+#   deep      -> /deepz         fails when most sessions are unhealthy
+#   heartbeat -> /livez         fails when a maintenance loop has stopped
+#
+# Note the probes point at port 8081, which is a separate http.Server with its
+# own goroutines and no access to the session-manager lock. /livez-shared is
+# the same check behind that lock, for reproducing the contention failure.
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: liveness-demo
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: naive
+  namespace: liveness-demo
+  labels: { app: naive }
+spec:
+  replicas: 3
+  selector:
+    matchLabels: { app: naive }
+  template:
+    metadata:
+      labels: { app: naive }
+    spec:
+      terminationGracePeriodSeconds: 40
+      containers:
+        - name: svc
+          image: liveness-demo:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - { name: app, containerPort: 8080 }
+            - { name: probes, containerPort: 8081 }
+          env:
+            - { name: CAPACITY, value: "60" }
+            # Microseconds of session-manager lock held per session per sweep.
+            # Set this above ~16000 with 60 sessions to reproduce scenario 4
+            # against /livez-shared.
+            - { name: SWEEP_COST_US, value: "0" }
+          livenessProbe:
+            httpGet: { path: /healthz, port: probes }
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            timeoutSeconds: 1
+            failureThreshold: 3
+          readinessProbe:
+            httpGet: { path: /readyz, port: probes }
+            initialDelaySeconds: 2
+            periodSeconds: 5
+            timeoutSeconds: 1
+            failureThreshold: 3
+          resources:
+            requests: { cpu: 50m, memory: 32Mi }
+            limits: { cpu: 500m, memory: 128Mi }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: deep
+  namespace: liveness-demo
+  labels: { app: deep }
+spec:
+  replicas: 3
+  selector:
+    matchLabels: { app: deep }
+  template:
+    metadata:
+      labels: { app: deep }
+    spec:
+      terminationGracePeriodSeconds: 40
+      containers:
+        - name: svc
+          image: liveness-demo:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - { name: app, containerPort: 8080 }
+            - { name: probes, containerPort: 8081 }
+          env:
+            - { name: CAPACITY, value: "60" }
+            - { name: SWEEP_COST_US, value: "0" }
+          livenessProbe:
+            httpGet: { path: /deepz, port: probes }
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            timeoutSeconds: 1
+            failureThreshold: 3
+          readinessProbe:
+            httpGet: { path: /readyz, port: probes }
+            initialDelaySeconds: 2
+            periodSeconds: 5
+            timeoutSeconds: 1
+            failureThreshold: 3
+          resources:
+            requests: { cpu: 50m, memory: 32Mi }
+            limits: { cpu: 500m, memory: 128Mi }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: heartbeat
+  namespace: liveness-demo
+  labels: { app: heartbeat }
+spec:
+  replicas: 3
+  selector:
+    matchLabels: { app: heartbeat }
+  template:
+    metadata:
+      labels: { app: heartbeat }
+    spec:
+      terminationGracePeriodSeconds: 40
+      containers:
+        - name: svc
+          image: liveness-demo:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - { name: app, containerPort: 8080 }
+            - { name: probes, containerPort: 8081 }
+          env:
+            - { name: CAPACITY, value: "60" }
+            - { name: SWEEP_COST_US, value: "0" }
+          livenessProbe:
+            httpGet: { path: /livez, port: probes }
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            timeoutSeconds: 1
+            failureThreshold: 3
+          readinessProbe:
+            httpGet: { path: /readyz, port: probes }
+            initialDelaySeconds: 2
+            periodSeconds: 5
+            timeoutSeconds: 1
+            failureThreshold: 3
+          resources:
+            requests: { cpu: 50m, memory: 32Mi }
+            limits: { cpu: 500m, memory: 128Mi }
+---
+# Guard 4 from the self-eviction design, expressed the way Kubernetes expresses
+# it. A pod that evicts itself must not be able to take the fleet with it.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: heartbeat-pdb
+  namespace: liveness-demo
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels: { app: heartbeat }

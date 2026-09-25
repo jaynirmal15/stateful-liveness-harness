@@ -1,0 +1,9 @@
+# build output
+/liveness
+/stateful-liveness-harness
+*.exe
+
+# local run artifacts
+results.txt
+series.csv
+*.log
